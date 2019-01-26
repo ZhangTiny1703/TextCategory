@@ -48,37 +48,32 @@ public class AutoClc5 {
         private static String dbURL ;
         private static String userName;
         private static String userPwd ;
-        private static Connection dbConn;
-        private static Statement sm;
+        private Connection dbConn;
+        private Statement sm;
         private ResultSet rs;
 
         //静态块初始化加载，连接数据库
         static{
-            try{
-                readDBConfig();
-                Class.forName(driverName);
-                dbConn = DriverManager.getConnection(dbURL, userName, userPwd);
-            }catch (Exception e){
-                throw new RuntimeException("数据库连接失败！");
-            }
-        }
-
-        //读取数据库配置文件
-        private static void readDBConfig() throws IOException {
+            properties prop = new Properties();
             InputStream is = AutoClc5.class.getClassLoader().getResourceAsStream("db.properties");
-            Properties prop = new Properties();
-            prop.load(is);
+            try{
+                prop.load(is);
+            }catch(IOException e){
+                e.printStackTrace();
+            }
             driverName = prop.getProperty("DRIVERNAME1");
             dbURL = prop.getProperty("URL1");
             userName = prop.getProperty("USERNAME1");
             userPwd = prop.getProperty("PASSWORD1");
-
         }
+        
         public void run() {
             DateFormat fmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             int i = 0;
             //连接数据库
             try {
+                Class.forName(driverName);
+                dbConn = DriverManager.getConnection(dbURL,userName,userPwd);
                 sm = dbConn.createStatement();
                 System.out.println("producer connect successfully!");
             } catch (Exception e) {
@@ -87,7 +82,7 @@ public class AutoClc5 {
             }
             //取数据库放入队列
             try {
-                rs = sm.executeQuery("select * from [DB_Fulltext_page].[dbo].[pages]");
+                rs = sm.executeQuery("select * from [DB_Fulltext_page].[dbo].[pages] where len([content])<150000");
                 while (rs.next()) {
                     //System.out.println(rs.getString("content"));
                     Map<String, String> row = new HashMap<>();
@@ -112,36 +107,31 @@ public class AutoClc5 {
         }
     }
     public static class Consumer1 implements Runnable {
+       
+        private static final Logger logger = LoggerFactory.getLogger(AutoClc5.class);
         private final BlockingQueue<Map<String, String>> blockingQueue1;
+        
         private volatile boolean flag = true;
         private static String driverName;
         private static String dbURL;
         private static String userName;
         private static String userPwd;
-        private static Connection dbConn;
+        private Connection dbConn;
         private PreparedStatement sm;
 //    private ResultSet rs = null;
 
         static{
-            try{
-                readDBConfig();
-                Class.forName(driverName);
-                dbConn = DriverManager.getConnection(dbURL, userName, userPwd);
-                // dbConn.setAutoCommit(false);
-            }catch (Exception e){
-                throw new RuntimeException("数据库连接失败！");
-            }
-        }
-
-        private static void readDBConfig() throws IOException {
+            properties prop = new Properties();
             InputStream is = AutoClc5.class.getClassLoader().getResourceAsStream("db.properties");
-            Properties prop = new Properties();
-            prop.load(is);
+            try{
+                prop.load(is);
+            }catch(IOException e){
+                e.printStackTrace();
+            }
             driverName = prop.getProperty("DRIVERNAME2");
             dbURL = prop.getProperty("URL2");
             userName = prop.getProperty("USERNAME2");
             userPwd = prop.getProperty("PASSWORD2");
-
         }
 
         public Consumer1(BlockingQueue<Map<String, String>> blockingQueue1) {
@@ -196,37 +186,41 @@ public class AutoClc5 {
 
         public void run() {
             DateFormat fmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            int batchCount =0;
+            //连接数据库
             try {
+                Class.forName(driverName);
+                dbConn = DriverManager.getConnection(dbURL,userName,userPwd);
                 sm = dbConn.prepareStatement("insert into [autoclcs2] (docid, content,category,clcs) values (?,?,?,?)");
                 System.out.println("consumer connect successfully!");
             } catch (Exception e) {
                 System.out.println("consumer connect failed!");
                 e.printStackTrace();
             }
-            int countn = 0;
 
-            while (flag) {
+            while (true) {
+                String id = null;
+                int begin;
                 try {
                     Map<String, String> row = blockingQueue1.take();
                     String content = row.get("content");
                     String id = row.get("id");
                     //如果查询队列已取完
                     if (content.equals("end-end")) {
-                        flag = false;
+                        blockingQueue1.put(row);
                         System.out.println("process is over");
+                        break;
                     } else {
                         content = baseFormat(content);
                         String newcontent = content;
                         int count = 0;        //count记录句数用来分段
                         int para_num = 0;
-                        int begin = 0;        //段落的起始位置
                         int len = newcontent.length();      //原始数据长度
                         StringBuffer fenciContent = new StringBuffer();
-                        StringBuffer ToDB = new StringBuffer("{");
+                        StringBuffer ToDB = new StringBuffer("[");
                         JSONArray arr = new JSONArray();
                         Map<String, String> map = new LinkedHashMap<>();
                         
-
                         //分段
                         for (int i = 0; i < len; i++) {
                             String subStr = newcontent.substring(i, i + 1);
@@ -247,12 +241,15 @@ public class AutoClc5 {
                                         word = word.split("/")[0];
                                         paragraph+=(word + " ");
                                     }
-                                   // String paragraph1 = paragraph.toString();
+                                 
                                     paragraph = paragraph.replaceAll("[[^\u4E00-\u9FA5]&&[^a-zA-Z0-9 ]]", "");
                                    // System.out.println(paragraph);                        
                                     fenciContent.append(paragraph);
                                     //将所有分段存入数组
-                                    map.put(para_num+":"+ "[" + begin + "," + i + ",",paragraph);
+                                    map.put("{paragraph:" + para_num + ","
+                                           + "offset_start:" + begin + ","
+                                           + "offset_end:" + i + ","
+                                           + "class:",paragraph);
                                                            
                                     begin = i + 1;
                                     count = 0;
@@ -267,8 +264,12 @@ public class AutoClc5 {
                     PrintWriter out = null;
                     BufferedReader in = null;
                     StringBuilder result2 = new StringBuilder();
-
-                    map.put(0+":"+ "["+ 0 + "," + len+ ",",fenciContent.toString());  //将全文添加到map最后
+                    
+                    map.put("{paragraph:" + 0 + ","
+                            + "offset_start:" + 0 + ","
+                            + "offset_end:" + len + ","
+                            + "class:",fenciContent.toString()); //将全文添加到map最后
+                        
                     for (Iterator iter = map.keySet().iterator(); iter.hasNext(); ) {
                         Object key=iter.next();
                         arr.add(map.get(key));
@@ -280,6 +281,7 @@ public class AutoClc5 {
                         conn.setRequestMethod("POST");
                         conn.setRequestProperty("accept", "*/*");
                         conn.setRequestProperty("connection", "Keep-Alive");
+                        comm.setRequestProperty("content-type","application/json");
                         conn.setRequestProperty("user-agent", "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1;SV1)");
                         conn.setDoOutput(true);
                         conn.setDoInput(true);
@@ -301,8 +303,9 @@ public class AutoClc5 {
                         }
 
                     } catch (Exception e) {
-//                                        e.printStackTrace();
-                        result2.append("[[\"null\",\"null\",\"null\",\"null\",\"null\"],[1,1,1,1,1]]");
+                        logger.error("error:can found in context[{}]",id,3,e);
+                        //e.printStackTrace();
+                        //result2.append("[[\"null\",\"null\",\"null\",\"null\",\"null\"],[1,1,1,1,1]]");
                     } finally {
                         if (in != null) {
                             try {
@@ -317,35 +320,32 @@ public class AutoClc5 {
                     }
 
                     ArrayList<String> al = new ArrayList<>();
-                    Pattern p = Pattern.compile("\\[\\[(.*?)\\],\\[(.*?)\\]\\]");
-                    Matcher m = p.matcher(result2);
-                    while (m.find()) {
-                        StringBuffer result3 = new StringBuffer("{");
-                        String[] s1 = m.group(1).split(",");
-                        String[] s2 = m.group(2).split(",");
-
-                        for (int k = 0; k < s1.length; k++) {
-                            result3.append(s1[k] + ":" + s2[k] + ",");
+                    for(int i=0;i<jsarr.size();i++){
+                        StringBuffer result3 = new StringBuffer("[");
+                        JSONArray ai = (JSONArray)jsarr.get(i);
+                        JSONArray a0 = (JSONArray)ai.get(0);
+                        JSONArray a1 = (JSONArray)ai.get(1);
+                        for(int j=0;j<a0.size();j++){
+                            StringBuffer r = new StringBuffer("{");
+                            r.append(a0.get(j)+":"+a1.get(j));
+                            r.append("}");
+                            result3.append(r);
                         }
                         result3.deleteCharAt(result3.length()-1);
-                        result3.append("}");
-                        String r=result3.toString().replaceAll("[\\[\\]]","");
-                        al.add(r);
-                    }
+                        result3.append("]");
+                        al.add(result3);
+                    }    
 
                     int al_num = 0;
                     for (Iterator iter = map.keySet().iterator(); iter.hasNext();al_num++) {                      
-                        ToDB.append(iter.next()+ al.get(al_num)+"],");
+                        ToDB.append(iter.next().toString()+ al.get(al_num)+"},");
                     }
                     ToDB.deleteCharAt(ToDB.length()-1);
-                    ToDB.append("}");
+                    ToDB.append("]");
                    // System.out.println(ToDB);
-                    JSONObject jso = new JSONObject(ToDB.toString());
-                    String cate = jso.getJSONArray("0").toString();
-                    jso.remove("0").toString();
-                   // System.out.println(cate);
-                   // System.out.println(jso.toString());
-                   // String remo = jso.toString();
+                    JSONArray jso = Json.parseArray(ToDB.toString());
+                    Object cate = jso.get(jso.size()-1);
+                    jso.remove(cate);
                         //写入数据库
                         try {
                             sm = dbConn.prepareStatement("insert into [autoclcs2] (docid,content,category,clcs ) values (?,?,?,?)");
@@ -353,7 +353,11 @@ public class AutoClc5 {
                             sm.setObject(2, content);
                             sm.setObject(3, cate);
                             sm.setObject(4, jso.toString());
-                            sm.execute();
+                            sm.addBatch();
+                            batchCount++;
+                            if(batchCount % 1000 ==0){
+                                sm.executeBatch();
+                            }
 
                         } catch (Exception e) {
                             e.printStackTrace();
@@ -362,10 +366,15 @@ public class AutoClc5 {
 
                 } catch (Exception e) {
                     System.out.println("process failed!");
-                    e.printStackTrace();
+                    logger.error("error:can found in context[{}]",id,3,e);
                 }
 
             }
+             try{
+                sm.executeBatch();
+             }catch(Exception e){
+                e.printStackTrace();
+             }
 
         }
 
